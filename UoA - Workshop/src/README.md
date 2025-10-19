@@ -1,5 +1,5 @@
 ==============================
- ETL Data Engineer Interview
+ ETL Data Engineer Test
 ==============================
 
 Welcome! Please follow the instructions below to complete the ETL exercise.
@@ -17,11 +17,11 @@ Each step is important for a robust data pipeline.
     - Use environment variables (e.g., with python-dotenv and pyodbc).
 
     SQL_DRIVER={ODBC Driver 17 for SQL Server}
-    DB_SERVER=10.208.49.130
-    DB_INSTANCE=DNZAUC001M\SQLEXPRESS
+    DB_SERVER=10.111.22.333
+    DB_INSTANCE=SQLSERVER444\SQLEXPRESS
     DB_PORT=1433
-    DB_NAME=TechInterview
-    DB_USER=TechInterviewUser
+    DB_NAME=TechTest
+    DB_USER=TechTestUser
     DB_PASSWORD=StrongPassword123!
 
     - Do not hardcode credentials in your etl.py script.
