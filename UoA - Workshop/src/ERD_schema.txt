@@ -1,0 +1,28 @@
+------------------------------
+ ERD (Entity Relationship Diagram)
+------------------------------
+
+Database: TeckInterview
+
+Can
+  - CanID (INT, Primary Key, Identity)
+  - LineName (NVARCHAR(100), Nullable)
+
+Product
+  - ProductID (INT, Primary Key, Identity)
+  - ProductName (NVARCHAR(100), NOT NULL)
+  - ProductCode (NVARCHAR(50), Nullable)
+
+Operator
+  - OperatorID (INT, Primary Key, Identity)
+  - OperatorName (NVARCHAR(100), NOT NULL)
+
+WeightMeasurement
+  - MeasurementID (INT, Primary Key, Identity)
+  - CanID (INT, Foreign Key to Can)
+  - ProductID (INT, Foreign Key to Product)
+  - OperatorID (INT, Foreign Key to Operator)
+  - DateTime (DATETIME, NOT NULL)
+  - Weight (DECIMAL(10,3), NOT NULL)
+  - Shift (NVARCHAR(20), Nullable)
+  - Comments (NVARCHAR(255), Nullable)
