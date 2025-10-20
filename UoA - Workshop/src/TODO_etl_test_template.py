@@ -30,15 +30,6 @@ conn_str = f"DRIVER={{{driver}}};SERVER={server};UID={username};PWD={password};P
 
 try:
     cnxn = pyodbc.connect(conn_str)
-except pyodbc.OperationalError as e:
-    logger.error("Cannot connect to remote DB server")
-    logger.error(e)
-
-    import sqlite3
-
-    sqlite3_file = f"{database}.db.sqlite3"
-    logger.info(f"Falling back to local SQLite database '{sqlite3_file}'")
-    cnxn = sqlite3.connect(sqlite3_file)
 finally:
     logger.info("Successfully connected to the database.")
     logger.info(cnxn)
@@ -48,10 +39,12 @@ finally:
 cnxn.autocommit = True
 cursor = cnxn.cursor()
 
-# # TODO
-# # Read CSV file into pandas dataframe
+# TODO
+# Read CSV file into pandas dataframe
 
-# # df = ...
+csv_file_path = os.path.join(os.path.dirname(__file__), "DATA_101549999 Can Weight Report.csv")
+df = pd.read_csv(csv_file_path)
+
 # #################################### END_of_TODO_#3 #############################################
 
 
@@ -131,6 +124,21 @@ def get_or_insert_operator(operator_name):
         )
         return None
 
+def insert_weight_measurement(can_id, product_id, operator_id, datetime, weight, shift, comments):
+    logger.debug("Inserting WeightMeasurement")
+    try:
+        cursor.execute(
+            "INSERT INTO WeightMeasurement (CanID, ProductID, OperatorID, DateTime, Weight, Shift, Comments) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            can_id, product_id, operator_id, datetime, weight, shift, comments
+        )
+        cursor.execute("SELECT SCOPE_IDENTITY()")
+        weight_id_row = cursor.fetchone()
+        weight_id = weight_id_row[0] if weight_id_row else None
+        logger.debug(f"Inserted new WeightMeasurementID: {weight_id}")
+        return weight_id
+    except Exception as e:
+        logger.error(f"Failed to insert WeightMeasurement': {e}")
+        return None
 
 # Map CSV columns to DB columns and perform ETL
 for idx, row in df.iterrows():
@@ -150,7 +158,11 @@ for idx, row in df.iterrows():
         time_str = str(row.get("TIME", ""))
         if date_str and time_str:
             try:
-                dt = pd.to_datetime(f"{date_str} {time_str}", dayfirst=True)
+                dt = pd.to_datetime(
+                    f"{date_str} {time_str}", dayfirst=True
+                ).dt.tz_localize(
+                    'Pacific/Auckland'
+                ).dt.tz_convert('UTC')
             except Exception:
                 dt = None
         else:
@@ -192,7 +204,10 @@ for idx, row in df.iterrows():
 
         # TODO
         # Insert measurement into WeightMeasurement table
-        # ...
+        
+        weight_measurement_id = insert_weight_measurement(
+            can_id, product_id, operator_id, dt, weight, shift, comments
+        )
         #################################### END_of_TODO_#4 #############################################
         logger.info(f"Inserted measurement row {idx+1}")
     except Exception as e:
