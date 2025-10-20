@@ -1,0 +1,164 @@
+import os
+import pandas as pd
+import pyodbc
+from datetime import datetime
+import pytz
+from dotenv import load_dotenv
+import logging
+from glob import glob
+import shutil
+
+# --- Setup logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("etl_log.txt"),
+        logging.StreamHandler()
+    ]
+)
+
+# --- Load environment variables ---
+load_dotenv()
+
+SQL_DRIVER = os.getenv('SQL_DRIVER')
+DB_SERVER = os.getenv('DB_SERVER')
+DB_INSTANCE = os.getenv('DB_INSTANCE')
+DB_PORT = os.getenv('DB_PORT')
+DB_NAME = os.getenv('DB_NAME')
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+
+# --- Connect to SQL Server ---
+try:
+    conn_str = (
+        f"DRIVER={{{SQL_DRIVER}}};"
+        f"SERVER={DB_SERVER}\\{DB_INSTANCE},{DB_PORT};"
+        f"DATABASE={DB_NAME};"
+        f"UID={DB_USER};"
+        f"PWD={DB_PASSWORD}"
+    )
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
+    logging.info("Connected to SQL Server successfully.")
+except Exception as e:
+    logging.error(f"Error connecting to SQL Server: {e}")
+    raise
+
+# --- Function to process a single CSV ---
+def process_csv(csv_file):
+    try:
+        logging.info(f"Processing file: {csv_file}")
+        df = pd.read_csv(csv_file)
+        total_rows = len(df)
+        logging.info(f"Loaded {total_rows} rows.")
+
+        # Convert DATE + TIME to UTC
+        nzdt = pytz.timezone('Pacific/Auckland')
+        df['MeasurementDateTime'] = pd.to_datetime(df['DATE'] + ' ' + df['TIME'])
+        df['MeasurementDateTime'] = df['MeasurementDateTime'].apply(lambda x: nzdt.localize(x).astimezone(pytz.UTC))
+
+        # Insert Operators
+        for user in df['USER'].unique():
+            cursor.execute("""
+                IF NOT EXISTS (SELECT 1 FROM Operator WHERE UserName=?)
+                INSERT INTO Operator (UserName) VALUES (?)
+            """, (user, user))
+        conn.commit()
+
+        # Insert Products
+        for _, row in df[['SKU', 'FORMULATION', 'DENOMINATION']].drop_duplicates().iterrows():
+            cursor.execute("""
+                IF NOT EXISTS (SELECT 1 FROM Product WHERE SKU=?)
+                INSERT INTO Product (SKU, Formulation, Denomination)
+                VALUES (?,?,?)
+            """, (row['SKU'], row['FORMULATION'], row['DENOMINATION']))
+        conn.commit()
+
+        # Insert Can
+        cursor.execute("""
+            IF NOT EXISTS (SELECT 1 FROM Can WHERE ProductionLine=?) 
+            INSERT INTO Can (ProductionLine) VALUES (?)
+        """, ("Line1", "Line1"))
+        conn.commit()
+
+        cursor.execute("SELECT CanID FROM Can WHERE ProductionLine='Line1'")
+        can_id = cursor.fetchone()[0]
+
+        # Prepare batch insert for WeightMeasurements
+        batch_rows = []
+        inserted_rows = 0
+
+        for _, row in df.iterrows():
+            cursor.execute("SELECT OperatorID FROM Operator WHERE UserName=?", (row['USER'],))
+            operator_id = cursor.fetchone()[0]
+
+            cursor.execute("SELECT ProductID FROM Product WHERE SKU=?", (row['SKU'],))
+            product_id = cursor.fetchone()[0]
+
+            # Check existence
+            cursor.execute("""
+                SELECT 1 FROM WeightMeasurement
+                WHERE CanID=? AND ProductID=? AND OperatorID=? AND ProductionOrderNumber=? AND MeasurementDateTime=?
+            """, (
+                can_id, product_id, operator_id, row['PRODUCTION ORDER NUMBER'], row['MeasurementDateTime']
+            ))
+
+            if not cursor.fetchone():
+                batch_rows.append((
+                    can_id,
+                    product_id,
+                    operator_id,
+                    row['PRODUCTION ORDER NUMBER'],
+                    row['MeasurementDateTime'],
+                    row['AVERAGE TARE WEIGHT'],
+                    row['CAN NET WEIGHT']
+                ))
+
+            if len(batch_rows) >= 500:
+                cursor.executemany("""
+                    INSERT INTO WeightMeasurement 
+                    (CanID, ProductID, OperatorID, ProductionOrderNumber, MeasurementDateTime, AverageTareWeight, CanNetWeight)
+                    VALUES (?,?,?,?,?,?,?)
+                """, batch_rows)
+                conn.commit()
+                inserted_rows += len(batch_rows)
+                logging.info(f"Inserted batch of {len(batch_rows)} rows ({inserted_rows}/{total_rows})")
+                batch_rows = []
+
+        # Insert remaining rows
+        if batch_rows:
+            cursor.executemany("""
+                INSERT INTO WeightMeasurement 
+                (CanID, ProductID, OperatorID, ProductionOrderNumber, MeasurementDateTime, AverageTareWeight, CanNetWeight)
+                VALUES (?,?,?,?,?,?,?)
+            """, batch_rows)
+            conn.commit()
+            inserted_rows += len(batch_rows)
+            logging.info(f"Inserted final batch of {len(batch_rows)} rows ({inserted_rows}/{total_rows})")
+
+        logging.info(f"File processed successfully: {csv_file}")
+
+        # --- Move processed file to 'processed' folder ---
+        processed_folder = os.path.join(os.path.dirname(csv_file), 'processed')
+        os.makedirs(processed_folder, exist_ok=True)
+        shutil.move(csv_file, os.path.join(processed_folder, os.path.basename(csv_file)))
+        logging.info(f"Moved file to processed folder: {processed_folder}")
+
+    except Exception as e:
+        logging.error(f"Error processing file {csv_file}: {e}")
+        conn.rollback()
+
+
+# --- Process all CSVs in folder ---
+csv_folder = 'src/'  # Folder containing CSV files
+csv_files = glob(os.path.join(csv_folder, '*.csv'))
+logging.info(f"Found {len(csv_files)} CSV files in folder '{csv_folder}'.")
+
+for file in csv_files:
+    process_csv(file)
+
+# --- Close connection ---
+cursor.close()
+conn.close()
+logging.info("ETL completed for all files. Database connection closed.")
