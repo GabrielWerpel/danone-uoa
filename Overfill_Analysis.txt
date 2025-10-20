@@ -1,0 +1,234 @@
+# ==============================================================================  
+# MILK POWDER OVERFILL ANALYSIS NOTEBOOK  
+# ==============================================================================  
+
+# 1️⃣ Import libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import shap
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (12,6)
+
+# ==============================================================================  
+# OverfillAnalyzer Class
+# ==============================================================================  
+
+class OverfillAnalyzer:
+    def __init__(self, filepath, target_weight=0.9, tolerance=0.02):
+        self.target_weight = target_weight
+        self.tolerance = tolerance
+        self.data = None
+        self.load_data(filepath)
+        
+    def load_data(self, filepath):
+        df = pd.read_csv(filepath, dtype=str)
+        df.columns = df.columns.str.strip()
+        
+        # Parse datetime NZ -> UTC
+        df['datetime_nz'] = pd.to_datetime(
+            df['DATE'].astype(str) + ' ' + df['TIME'].astype(str),
+            format='%d/%m/%Y %I:%M %p', errors='coerce'
+        )
+        df['datetime_utc'] = df['datetime_nz'] - pd.Timedelta(hours=12)
+        df['hour'] = df['datetime_utc'].dt.hour
+        df['day_of_week'] = df['datetime_utc'].dt.dayofweek
+        df['date'] = df['datetime_utc'].dt.date
+        
+        # Clean net weight
+        df['net_weight'] = df['CAN NET WEIGHT'].astype(str).str.replace('kg','').str.strip()
+        df['net_weight'] = pd.to_numeric(df['net_weight'], errors='coerce')
+        df['deviation'] = df['net_weight'] - self.target_weight
+        df['deviation_percent'] = (df['deviation'] / self.target_weight) * 100
+        df['is_overfill'] = df['deviation'] > (self.target_weight*self.tolerance)
+        df['is_underfill'] = df['deviation'] < -(self.target_weight*self.tolerance)
+        df['is_in_spec'] = ~(df['is_overfill'] | df['is_underfill'])
+        
+        numeric_cols = ['AMBIENT RH (%)','TEMP (°C)','POWDER MOISTURE (%)',
+                        'BULK DENSITY (kg/L)','VIBRATION (mm/s)','STATIC (kV)',
+                        'FEEDER RATE (kg/h)','VALVE DELAY (ms)','CAL DRIFT (kg)',
+                        'AVERAGE TARE WEIGHT']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        categorical_cols = ['USER','PRODUCTION ORDER NUMBER','SKU','FORMULATION','DENOMINATION']
+        for col in categorical_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+        
+        rename_dict = {
+            'USER':'user','PRODUCTION ORDER NUMBER':'production_order','SKU':'sku',
+            'FORMULATION':'formulation','AVERAGE TARE WEIGHT':'tare_weight',
+            'DENOMINATION':'denomination','AMBIENT RH (%)':'humidity','TEMP (°C)':'temperature',
+            'POWDER MOISTURE (%)':'powder_moisture','BULK DENSITY (kg/L)':'bulk_density',
+            'VIBRATION (mm/s)':'vibration','STATIC (kV)':'static','FEEDER RATE (kg/h)':'feeder_rate',
+            'VALVE DELAY (ms)':'valve_delay','CAL DRIFT (kg)':'cal_drift'
+        }
+        df.rename(columns=rename_dict, inplace=True)
+        df = df.dropna(subset=['net_weight','datetime_utc'])
+        self.data = df
+        print(f"✓ Loaded {len(df)} records")
+        print(f"✓ Date range: {df['datetime_utc'].min()} to {df['datetime_utc'].max()} (UTC)")
+        print(f"✓ Users: {df['user'].nunique()}, Production Orders: {df['production_order'].nunique()}")
+    
+    # ---------------- Summary ----------------
+    def summary_statistics(self):
+        total = len(self.data)
+        overfill_count = self.data['is_overfill'].sum()
+        underfill_count = self.data['is_underfill'].sum()
+        in_spec_count = self.data['is_in_spec'].sum()
+        print(f"\nTotal samples: {total}")
+        print(f"In specification: {in_spec_count} ({in_spec_count/total*100:.1f}%)")
+        print(f"Overfill: {overfill_count} ({overfill_count/total*100:.1f}%)")
+        print(f"Underfill: {underfill_count} ({underfill_count/total*100:.1f}%)")
+    
+    # ---------------- Regression + SHAP ----------------
+    def regression_analysis(self):
+        numeric_features = ['humidity','temperature','powder_moisture','bulk_density',
+                            'vibration','static','feeder_rate','valve_delay','cal_drift',
+                            'hour','day_of_week']
+        available_features = [f for f in numeric_features if f in self.data.columns]
+        df_clean = self.data[available_features+['deviation']].dropna()
+        X = df_clean[available_features]
+        y = df_clean['deviation']
+        X_train,X_test,y_train,y_test = train_test_split(X,y,test_size=0.2,random_state=42)
+        
+        # Linear Regression
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        lr = LinearRegression()
+        lr.fit(X_train_scaled,y_train)
+        y_pred_lr = lr.predict(X_test_scaled)
+        print("\nLINEAR REGRESSION")
+        print(f"R²: {r2_score(y_test,y_pred_lr):.4f}, MAE: {mean_absolute_error(y_test,y_pred_lr)*1000:.2f} g")
+        
+        # Random Forest
+        rf = RandomForestRegressor(n_estimators=100,max_depth=10,random_state=42)
+        rf.fit(X_train,y_train)
+        y_pred_rf = rf.predict(X_test)
+        print("\nRANDOM FOREST")
+        print(f"R²: {r2_score(y_test,y_pred_rf):.4f}, MAE: {mean_absolute_error(y_test,y_pred_rf)*1000:.2f} g")
+        
+        # Gradient Boosting
+        gb = GradientBoostingRegressor(n_estimators=100,max_depth=5,random_state=42)
+        gb.fit(X_train,y_train)
+        y_pred_gb = gb.predict(X_test)
+        print("\nGRADIENT BOOSTING")
+        print(f"R²: {r2_score(y_test,y_pred_gb):.4f}, MAE: {mean_absolute_error(y_test,y_pred_gb)*1000:.2f} g")
+        
+        # ---------------- SHAP ----------------
+        os.makedirs('./overfill_plots', exist_ok=True)
+        explainer = shap.TreeExplainer(rf)
+        shap_values = explainer.shap_values(X_test)
+        shap_importance = pd.DataFrame({
+            'feature': X_test.columns,
+            'shap_mean_abs': np.abs(shap_values).mean(axis=0)
+        }).sort_values('shap_mean_abs', ascending=False)
+        print("\nTop 10 SHAP Features:")
+        print(shap_importance.head(10).to_string(index=False))
+        
+        plt.figure(figsize=(10,6))
+        top_shap = shap_importance.head(10)
+        plt.barh(top_shap['feature'][::-1], top_shap['shap_mean_abs'][::-1], color='skyblue')
+        plt.xlabel('Mean |SHAP Value|')
+        plt.title('Top 10 Features Contributing to Overfill (SHAP)')
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('./overfill_plots/07_shap_importance.png', dpi=300)
+        plt.show()
+        
+        for feat in top_shap['feature'].head(3):
+            shap.dependence_plot(feat, shap_values, X_test, show=True)
+        
+        return {'linear_regression': lr, 'random_forest': rf, 'gradient_boosting': gb, 'scaler': scaler}
+
+    # ---------------- Visualizations ----------------
+    def generate_visualizations(self):
+        os.makedirs('./overfill_plots', exist_ok=True)
+        df = self.data
+        
+        # Histogram
+        plt.figure(figsize=(10,5))
+        plt.hist(df['deviation']*1000,bins=50,edgecolor='black',alpha=0.7)
+        plt.axvline(0,color='red',linestyle='--',label='Target')
+        plt.axvline(self.target_weight*self.tolerance*1000,color='orange',linestyle='--',label='Tolerance')
+        plt.xlabel('Deviation (g)')
+        plt.ylabel('Frequency')
+        plt.title('Weight Deviation Distribution')
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('./overfill_plots/01_histogram.png',dpi=300)
+        plt.close()
+        
+        # Control Chart
+        plt.figure(figsize=(12,6))
+        plt.plot(range(len(df)),df['deviation']*1000,'o-',markersize=2,alpha=0.5)
+        mean_dev = df['deviation'].mean()*1000
+        std_dev = df['deviation'].std()*1000
+        plt.axhline(mean_dev,color='green',linestyle='-',label='Mean')
+        plt.axhline(mean_dev+3*std_dev,color='red',linestyle='--',label='UCL')
+        plt.axhline(mean_dev-3*std_dev,color='red',linestyle='--')
+        plt.xlabel('Sample')
+        plt.ylabel('Deviation (g)')
+        plt.title('Control Chart')
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('./overfill_plots/02_control_chart.png',dpi=300)
+        plt.close()
+        
+        # Heatmap: user x hour
+        pivot = df.groupby(['user','hour'])['is_overfill'].mean().unstack(fill_value=0)*100
+        plt.figure(figsize=(14,6))
+        sns.heatmap(pivot,annot=True,fmt='.1f',cmap='RdYlGn_r',vmin=0,vmax=30)
+        plt.title('Overfill % by User and Hour')
+        plt.xlabel('Hour')
+        plt.ylabel('User')
+        plt.tight_layout()
+        plt.savefig('./overfill_plots/03_heatmap.png',dpi=300)
+        plt.close()
+        
+        # Scatter plot: net_weight vs feeder_rate
+        if 'feeder_rate' in df.columns:
+            plt.figure(figsize=(10,6))
+            sns.scatterplot(x='feeder_rate',y='net_weight',data=df,hue='is_overfill',palette={True:'red',False:'blue'},alpha=0.6)
+            plt.xlabel('Feeder Rate (kg/h)')
+            plt.ylabel('Net Weight (kg)')
+            plt.title('Net Weight vs Feeder Rate')
+            plt.tight_layout()
+            plt.savefig('./overfill_plots/04_scatter_feeder.png',dpi=300)
+            plt.close()
+        
+        # Time series: daily overfill %
+        daily = df.groupby('date')['is_overfill'].mean()*100
+        plt.figure(figsize=(12,5))
+        daily.plot(marker='o')
+        plt.ylabel('Overfill %')
+        plt.title('Daily Overfill %')
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('./overfill_plots/05_daily_overfill.png',dpi=300)
+        plt.close()
+        
+        print("✓ All visualizations saved to ./overfill_plots/")
+        
+# ---------------- Run Analysis ----------------
+if __name__ == "__main__":
+    analyzer = OverfillAnalyzer(filepath='synthetic_logs.csv', target_weight=0.9, tolerance=0.02)
+    analyzer.summary_statistics()
+    analyzer.generate_visualizations()
+    models = analyzer.regression_analysis()
