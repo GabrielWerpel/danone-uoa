@@ -18,12 +18,23 @@ logger.setLevel(logging.DEBUG)
 # Load environment variables from .env file (hint: using python-dotenv library)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
 
-# ...
-# ...
-
 # Set up SQL Server connection using environment variables
+driver = os.getenv("SQL_DRIVER")
+server = os.getenv("DB_SERVER")
+instance = os.getenv("DB_INSTANCE")
+port = os.getenv("DB_PORT")
+database = os.getenv("DB_NAME")
+username = os.getenv("DB_USER")
+password = os.getenv("DB_PASSWORD")
 
-# conn_str = ...
+conn_str = (
+    f"DRIVER={driver};"
+    f"SERVER={server}\\{instance},{port};"
+    f"DATABASE={database};"
+    f"UID={username};"
+    f"PWD={password};"
+    f"TrustServerCertificate=yes;"
+)
 #################################### END_of_TODO_#2 #############################################
 
 cnxn = pyodbc.connect(conn_str)
@@ -32,8 +43,7 @@ cursor = cnxn.cursor()
 
 # TODO
 # Read CSV file into pandas dataframe
-
-# df = ...
+df = pd.read_csv("DATA_101549999 Can Weight Report.csv")
 #################################### END_of_TODO_#3 #############################################
 
 # Helper functions to get or insert and return IDs
@@ -109,6 +119,9 @@ for idx, row in df.iterrows():
         if date_str and time_str:
             try:
                 dt = pd.to_datetime(f"{date_str} {time_str}", dayfirst=True)
+        # TODO
+        # EXTRA CREDIT: Transform data from NZDT to UTC
+                dt = dt.tz_localize("Pacific/Auckland").tz_convert("UTC")
             except Exception:
                 dt = None
         else:
@@ -142,7 +155,11 @@ for idx, row in df.iterrows():
 
         # TODO
         # Insert measurement into WeightMeasurement table
-        # ...
+        cursor.execute(
+            """
+            INSERT INTO WeightMeasurement (CanID, ProductID, OperatorID, DateTime, Weight, Shift, Comments)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, can_id, product_id, operator_id, dt, weight, shift, comments)
         #################################### END_of_TODO_#4 #############################################
         logger.info(f"Inserted measurement row {idx+1}")
     except Exception as e:
